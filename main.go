@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,6 +22,8 @@ import (
 )
 
 const (
+	version = "v1.0.0"
+
 	defaultConfig = `{
 	"cf_auth_key": "[put your api key here]",
 	"cf_auth_email": "[put your cf email here]",
@@ -31,18 +34,24 @@ const (
 }
 `
 
+	banner = `
+     __               _      _       
+ __ / _|_  _ _ __  __| |__ _| |_ ___ 
+/ _|  _| || | '_ \/ _` + "` / _`" + ` |  _/ -_)
+\__|_|  \_,_| .__/\__,_\__,_|\__\___|
+            |_|                      
+`
+
 	updateModeV6 = "ipv6"
 	updateModeV4 = "ipv4"
 )
 
 var (
-	state    *cache.Cache
-	config   *viper.Viper
-	cf       *cloudflare.API
-	hostname string
-	zoneName string = "nkcmr.net" // @todo: make this configurable
-
-	errNoRecord = errors.New("could not find a matching dns record")
+	// there are some concurrent map read and map write issues somewhere in go's HTTP2 code
+	cfReqLock = sync.Mutex{}
+	cf        *cloudflare.API
+	state     *cache.Cache
+	config    *viper.Viper
 )
 
 type updateResult struct {
@@ -97,8 +106,7 @@ func getHostname(v *viper.Viper) string {
 	if err != nil {
 		log.Fatalf("alert: %s", err.Error())
 	}
-	ignoreHNParts := regexp.MustCompile(`(-[0-9]+)?(\.local)$`)
-	return ignoreHNParts.ReplaceAllString(hn, "")
+	return regexp.MustCompile(`(-[0-9]+)?(\.local)$`).ReplaceAllString(hn, "")
 }
 
 func setAddress(fam, addr string) {
@@ -114,6 +122,8 @@ func getAddress(fam string) string {
 }
 
 func main() {
+	os.Stdout.Write([]byte(banner))
+	os.Stdout.Write([]byte(fmt.Sprintf("\n(version: %s)\n\n", version)))
 	{
 		var err error
 		f, err := os.Open(configFile())
@@ -160,25 +170,47 @@ func main() {
 		}
 	}
 
-	results := map[string]chan updateResult{}
+	var setResultChan func(string, chan updateResult)
+	var rmResultsChan func(string)
+	var getResultsChan func(string) chan updateResult
+	{
+		lock := sync.RWMutex{}
+		results := map[string]chan updateResult{}
+		setResultChan = func(fam string, c chan updateResult) {
+			lock.Lock()
+			defer lock.Unlock()
+			results[fam] = c
+		}
+		rmResultsChan = func(fam string) {
+			lock.Lock()
+			defer lock.Unlock()
+			delete(results, fam)
+		}
+		getResultsChan = func(fam string) chan updateResult {
+			lock.RLock()
+			defer lock.RUnlock()
+			return results[fam]
+		}
+	}
+
 	sigchan := make(chan os.Signal, 1)
 	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
 
 coreLoop:
 	for {
 		select {
-		case v4result := <-results[updateModeV4]:
-			close(results[updateModeV4])
-			delete(results, updateModeV4)
+		case v4result := <-getResultsChan(updateModeV4):
+			close(getResultsChan(updateModeV4))
+			rmResultsChan(updateModeV4)
 			if v4result.err != nil {
 				log.Printf("error: v4 update error: %s", v4result.err.Error())
 			}
 			if v4result.cfUpdated {
 				log.Printf("info: cf updated with new ip address: %s", getAddress(updateModeV4))
 			}
-		case v6result := <-results[updateModeV6]:
-			close(results[updateModeV6])
-			delete(results, updateModeV6)
+		case v6result := <-getResultsChan(updateModeV6):
+			close(getResultsChan(updateModeV6))
+			rmResultsChan(updateModeV6)
 			if v6result.err != nil {
 				log.Printf("error: v6 update error: %s", v6result.err.Error())
 			}
@@ -186,11 +218,11 @@ coreLoop:
 				log.Printf("info: cf updated with new ip address: %s", getAddress(updateModeV6))
 			}
 		case <-time.After(updateInterval(config)):
-			results[updateModeV4] = make(chan updateResult, 1)
-			go update(updateModeV4, results[updateModeV4])
+			setResultChan(updateModeV4, make(chan updateResult, 1))
+			go update(updateModeV4, getResultsChan(updateModeV4))
 			if config.GetBool("ipv6") {
-				results[updateModeV6] = make(chan updateResult, 1)
-				go update(updateModeV6, results[updateModeV6])
+				setResultChan(updateModeV6, make(chan updateResult, 1))
+				go update(updateModeV6, getResultsChan(updateModeV6))
 			}
 		case sig := <-sigchan:
 			log.Printf("received %s signal. exiting...", sig.String())
@@ -242,6 +274,8 @@ func update(mode string, result chan updateResult) {
 		return
 	}
 
+	cfReqLock.Lock()
+	defer cfReqLock.Unlock()
 	err = cf.UpdateDNSRecord(zid, rid, cloudflare.DNSRecord{
 		Content: ip,
 	})
@@ -286,6 +320,8 @@ func icanhazip(mode string) (string, error) {
 }
 
 func getZoneID(zoneName string) (string, error) {
+	cfReqLock.Lock()
+	defer cfReqLock.Unlock()
 	stateKey := fmt.Sprintf("zone.%s.id", zoneName)
 	if v, ok := state.Get(stateKey); ok {
 		return v.(string), nil
@@ -304,6 +340,8 @@ func getZoneID(zoneName string) (string, error) {
 }
 
 func getRecord(zoneID, recordName, fam string) (string, string, error) {
+	cfReqLock.Lock()
+	defer cfReqLock.Unlock()
 	fqdn := fmt.Sprintf("%s.%s", recordName, config.GetString("zone_name"))
 	stateKey := fmt.Sprintf("record.%s.%s.%s.id", zoneID, recordName, fam)
 	if v, ok := state.Get(stateKey); ok {
