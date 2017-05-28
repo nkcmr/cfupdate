@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	version = "v1.0.0"
+	version = "v1.0.1"
 
 	defaultConfig = `{
 	"cf_auth_key": "[put your api key here]",
