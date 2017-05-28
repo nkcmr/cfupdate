@@ -60,7 +60,8 @@ type updateResult struct {
 }
 
 func configFile() string {
-	return strings.TrimRight(os.Getenv("HOME"), string(os.PathSeparator)) + "/.cfupdate.json"
+	ps := string(os.PathSeparator)
+	return strings.TrimRight(os.Getenv("HOME"), ps) + ps + ".cfupdate.json"
 }
 
 func readConfig(cfg io.Reader) (*viper.Viper, error) {
