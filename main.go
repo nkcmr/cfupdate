@@ -367,5 +367,22 @@ func getRecord(zoneID, recordName, fam string) (string, string, error) {
 			return r.ID, r.Content, nil
 		}
 	}
-	return "", "", errors.Errorf(`could not find %s record with name "%s"`, recType, recordName)
+	log.Printf("debug: could not find %s record for %s, creating one...", recType, fqdn)
+	var defaultContent string
+	if fam == updateModeV6 {
+		defaultContent = "0:0:0:0:0:0:0:0"
+	} else if fam == updateModeV4 {
+		defaultContent = "0.0.0.0"
+	} else {
+		log.Panicf("unknown ip address family: %s", fam)
+	}
+	res, err := cf.CreateDNSRecord(zoneID, cloudflare.DNSRecord{
+		Type:    recType,
+		Content: defaultContent,
+		Name:    fqdn,
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return res.Result.ID, res.Result.Content, nil
 }
