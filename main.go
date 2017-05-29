@@ -28,6 +28,7 @@ const (
 	"cf_auth_key": "[put your api key here]",
 	"cf_auth_email": "[put your cf email here]",
 	"zone_name": "[put the name of the zone you want to update here]",
+	"orange_cloud": false,
 	"update_interval": "1m",
 	"log_level": "warn",
 	"ipv6": false
@@ -70,6 +71,7 @@ func readConfig(cfg io.Reader) (*viper.Viper, error) {
 
 	v.SetDefault("ipv6", false)
 	v.SetDefault("update_interval", "5s")
+	v.SetDefault("orange_cloud", false)
 
 	return v, v.ReadConfig(cfg)
 }
@@ -279,6 +281,7 @@ func update(mode string, result chan updateResult) {
 	defer cfReqLock.Unlock()
 	err = cf.UpdateDNSRecord(zid, rid, cloudflare.DNSRecord{
 		Content: ip,
+		Proxied: config.GetBool("orange_cloud"),
 	})
 	if err != nil {
 		ur.err = errors.Wrap(err, "failed to update cloudflare")
