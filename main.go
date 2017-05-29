@@ -382,7 +382,7 @@ func getRecord(zoneID, recordName, fam string) (string, string, error) {
 	res, err := cf.CreateDNSRecord(zoneID, cloudflare.DNSRecord{
 		Type:    recType,
 		Content: defaultContent,
-		Name:    fqdn,
+		Name:    recordName,
 	})
 	if err != nil {
 		return "", "", err
